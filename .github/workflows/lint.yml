@@ -21,7 +21,7 @@ jobs:
 
     - name: Run cppcheck
       run: |
-        cppcheck --enable=all --suppress=missingIncludeSystem --error-exitcode=1 src/ include/
+        cppcheck --enable=all --suppress=missingIncludeSystem --inline-suppr --error-exitcode=1 src/ include/
 
     - name: Build project
       run: |
