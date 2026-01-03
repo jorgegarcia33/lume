@@ -21,6 +21,7 @@ static ssize_t send_all(int sock, const void *buf, size_t len) {
 }
 
 void *beacon_sender(void *arg) {
+    (void)arg;
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return NULL;
 
@@ -50,6 +51,7 @@ void *beacon_sender(void *arg) {
 }
 
 void *beacon_receiver(void *arg) {
+    (void)arg;
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return NULL;
 
@@ -117,7 +119,7 @@ void *connection_handler(void *arg) {
         if (header.type == MSG_TEXT) {
             char *buffer = malloc(header.payload_len + 1);
             if (buffer) {
-                if (recv(sock, buffer, header.payload_len, MSG_WAITALL) == header.payload_len) {
+                if ((size_t)recv(sock, buffer, header.payload_len, MSG_WAITALL) == header.payload_len) {
                     buffer[header.payload_len] = '\0';
                     log_message("%s: %s", header.sender_name, buffer);
                 }
@@ -142,7 +144,7 @@ void *connection_handler(void *arg) {
                     if (recv(sock, &chunk_header, sizeof(chunk_header), MSG_WAITALL) != sizeof(chunk_header)) break;
                     if (chunk_header.type != MSG_FILE_CHUNK) break;
                     
-                    if (recv(sock, buffer, chunk_header.payload_len, MSG_WAITALL) != chunk_header.payload_len) break;
+                    if ((size_t)recv(sock, buffer, chunk_header.payload_len, MSG_WAITALL) != chunk_header.payload_len) break;
                     
                     write(fd, buffer, chunk_header.payload_len);
                     total_received += chunk_header.payload_len;
@@ -158,6 +160,7 @@ void *connection_handler(void *arg) {
 }
 
 void *tcp_server(void *arg) {
+    (void)arg;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return NULL;
 
