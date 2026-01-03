@@ -29,7 +29,7 @@ A lightweight, terminal-based peer-to-peer (P2P) chat application written in C.
 The easiest way to install Lume is by running our automated script:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/jorgegarcia33/lume/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/jorgegarcia33/lume/master/install.sh | bash
 ```
 
 #### Manual Installation
