@@ -37,10 +37,10 @@ void init_ui() {
     wbkgd(app_state.win_input, COLOR_PAIR(1));
 
     scrollok(app_state.win_chat, TRUE);
-    
+
     pthread_mutex_init(&app_state.peer_mutex, NULL);
     pthread_mutex_init(&app_state.chat_mutex, NULL);
-    
+
     app_state.peer_count = 0;
     app_state.selected_peer_index = -1;
     app_state.running = 1;
@@ -59,24 +59,24 @@ void cleanup_ui() {
 
 void draw_interface() {
     pthread_mutex_lock(&app_state.peer_mutex);
-    
+
     wclear(app_state.win_header);
     box(app_state.win_header, 0, 0);
     mvwprintw(app_state.win_header, 1, 2, "Lume - %s:%d", app_state.local_username, app_state.local_tcp_port);
-    
+
     if (app_state.peer_count > 0) {
         if (app_state.selected_peer_index == -1) app_state.selected_peer_index = 0;
         if (app_state.selected_peer_index >= app_state.peer_count) app_state.selected_peer_index = 0;
-        
+
         Peer selected = app_state.peers[app_state.selected_peer_index];
         char *ip_str = inet_ntoa(selected.ip_addr);
 
         wattron(app_state.win_header, COLOR_PAIR(3));
-        mvwprintw(app_state.win_header, 1, 35, "To: %s [%s:%d] (%d/%d)", 
-            selected.username, 
+        mvwprintw(app_state.win_header, 1, 35, "To: %s [%s:%d] (%d/%d)",
+            selected.username,
             ip_str,
             selected.tcp_port,
-            app_state.selected_peer_index + 1, 
+            app_state.selected_peer_index + 1,
             app_state.peer_count);
         wattroff(app_state.win_header, COLOR_PAIR(3));
     } else {
@@ -85,13 +85,13 @@ void draw_interface() {
         wattroff(app_state.win_header, COLOR_PAIR(2));
     }
     wrefresh(app_state.win_header);
-    
+
     pthread_mutex_unlock(&app_state.peer_mutex);
 
     box(app_state.win_input, 0, 0);
     mvwprintw(app_state.win_input, 1, 2, "> ");
     wrefresh(app_state.win_input);
-    
+
     pthread_mutex_lock(&app_state.chat_mutex);
     wrefresh(app_state.win_chat);
     pthread_mutex_unlock(&app_state.chat_mutex);
@@ -99,7 +99,7 @@ void draw_interface() {
 
 void log_message(const char *fmt, ...) {
     pthread_mutex_lock(&app_state.chat_mutex);
-    
+
     time_t rawtime;
     const struct tm *timeinfo;
     char timestamp[12];
@@ -117,19 +117,29 @@ void log_message(const char *fmt, ...) {
     } else if (strstr(fmt, ": ") != NULL && strstr(fmt, "Me ->") == NULL) {
         color = 4;
     }
-    
+
     wattron(app_state.win_chat, COLOR_PAIR(color));
-    
+
     va_list args;
     va_start(args, fmt);
     vw_printw(app_state.win_chat, fmt, args);
     wprintw(app_state.win_chat, "\n");
     va_end(args);
-    
+
     wattroff(app_state.win_chat, COLOR_PAIR(color));
-    
+
     wrefresh(app_state.win_chat);
     pthread_mutex_unlock(&app_state.chat_mutex);
+}
+
+void show_help() {
+    log_message("Available commands:");
+    log_message("  /file <path>  - Send a file to the selected peer");
+    log_message("  /help         - Show this help message");
+    log_message("");
+    log_message("Controls:");
+    log_message("  UP/DOWN       - Select peer");
+    log_message("  ESC           - Quit");
 }
 
 void handle_input() {
@@ -142,7 +152,7 @@ void handle_input() {
 
     while (app_state.running) {
         draw_interface();
-        
+
         mvwprintw(app_state.win_input, 1, 4, "%s", input_buf);
         wrefresh(app_state.win_input);
 
@@ -162,7 +172,9 @@ void handle_input() {
                 pthread_mutex_unlock(&app_state.peer_mutex);
             } else if (ch == '\n') {
                 if (input_pos > 0) {
-                    if (strncmp(input_buf, "/file ", 6) == 0) {
+                    if (strcmp(input_buf, "/help") == 0) {
+                        show_help();
+                    } else if (strncmp(input_buf, "/file ", 6) == 0) {
                         send_file(app_state.selected_peer_index, input_buf + 6);
                     } else {
                         send_text_message(app_state.selected_peer_index, input_buf);
@@ -174,7 +186,7 @@ void handle_input() {
             } else if (ch == KEY_BACKSPACE || ch == 127) {
                 if (input_pos > 0) {
                     input_buf[--input_pos] = '\0';
-                    mvwprintw(app_state.win_input, 1, 4 + input_pos, " "); 
+                    mvwprintw(app_state.win_input, 1, 4 + input_pos, " ");
                 }
             } else if (input_pos < 255 && ch >= 32 && ch <= 126) {
                 input_buf[input_pos++] = ch;

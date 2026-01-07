@@ -188,6 +188,7 @@ int main(int argc, char *argv[]) {
 
     log_message("Welcome to Lume, %s!", app_state.local_username);
     log_message("Listening on port %d...", app_state.local_tcp_port);
+    log_message("Type /help for available commands");
 
     handle_input();
 
