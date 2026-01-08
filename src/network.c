@@ -35,8 +35,11 @@ int get_local_ip(char *ip_buffer, size_t buffer_size) {
 
         if (ifa->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
-            char *ip = inet_ntoa(addr->sin_addr);
+            char ip[INET_ADDRSTRLEN];
 
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)) == NULL) {
+                continue;
+            }
             // Skip loopback addresses
             if (strcmp(ip, "127.0.0.1") != 0) {
                 strncpy(ip_buffer, ip, buffer_size - 1);
