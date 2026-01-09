@@ -91,26 +91,20 @@ void draw_interface() {
 
         wattron(app_state.win_header, COLOR_PAIR(3));
 
-        // Calculate length of local user info to prevent overlap
-        int local_info_len = snprintf(NULL, 0, "Lume - %s [%s:%d]",
-                                      app_state.local_username,
-                                      app_state.local_ip,
-                                      app_state.local_tcp_port);
+        // message to be displayed on header
+        char peer_message[128];
+        int local_info_len = snprintf(peer_message, sizeof(peer_message), 
+                                    "To: %s [%s:%d] (%d/%d)",
+                                    selected.username,
+                                    ip_str,
+                                    selected.tcp_port,
+                                    app_state.selected_peer_index + 1,
+                                    app_state.peer_count);
 
-        // Position peer info with safe spacing (at least 5 chars gap)
-        int peer_col = local_info_len + 7;
-
-        // Fallback to midpoint if calculated position is too far right
-        if (peer_col > max_x / 2) {
-            peer_col = max_x / 2;
-        }
-
-        mvwprintw(app_state.win_header, 1, peer_col, "To: %s [%s:%d] (%d/%d)",
-            selected.username,
-            ip_str,
-            selected.tcp_port,
-            app_state.selected_peer_index + 1,
-            app_state.peer_count);
+        // Right align peer message to prevent overlap
+        int peer_col = (max_x-local_info_len)-2;
+        
+        mvwprintw(app_state.win_header, 1, peer_col, "%s", peer_message);
         wattroff(app_state.win_header, COLOR_PAIR(3));
     } else {
         wattron(app_state.win_header, COLOR_PAIR(2));
