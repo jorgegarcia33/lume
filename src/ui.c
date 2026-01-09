@@ -129,7 +129,6 @@ void draw_interface() {
     wnoutrefresh(app_state.win_input);
 
     wnoutrefresh(app_state.win_chat);
-    doupdate();
 }
 
 void log_message(const char *fmt, ...) {
@@ -294,15 +293,17 @@ void handle_input() {
 
     while (app_state.running) {
         pthread_mutex_lock(&app_state.chat_mutex);
-        
+        werase(app_state.win_input);
         draw_interface();
         mvwprintw(app_state.win_input, 1, 4, "%s", input_buf);
         wnoutrefresh(app_state.win_input);
         doupdate();
+        pthread_mutex_unlock(&app_state.chat_mutex);
 
         int ch = wgetch(app_state.win_input);
         
         if (ch != ERR) {
+            pthread_mutex_lock(&app_state.chat_mutex);
             if (ch == KEY_UP) {
                 pthread_mutex_lock(&app_state.peer_mutex);
                 if (app_state.peer_count > 0) {
@@ -342,7 +343,7 @@ void handle_input() {
             } else if (ch == 27) {
                 app_state.running = 0;
             }
+            pthread_mutex_unlock(&app_state.chat_mutex);
         }
-        pthread_mutex_unlock(&app_state.chat_mutex);
     }
 }
