@@ -39,12 +39,20 @@ void init_ui() {
 
     scrollok(app_state.win_chat, TRUE);
 
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&app_state.peer_mutex, NULL);
-    pthread_mutex_init(&app_state.chat_mutex, NULL);
+    pthread_mutex_init(&app_state.chat_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
 
     app_state.peer_count = 0;
     app_state.selected_peer_index = -1;
     app_state.running = 1;
+
+    pthread_mutex_init(&app_state.file_transfer_mutex, NULL);
+    app_state.pending_file_transfer = 0;
+    app_state.pending_sock = -1;
 
     refresh();
 }
@@ -56,12 +64,13 @@ void cleanup_ui() {
     endwin();
     pthread_mutex_destroy(&app_state.peer_mutex);
     pthread_mutex_destroy(&app_state.chat_mutex);
+    pthread_mutex_destroy(&app_state.file_transfer_mutex);
 }
 
 void draw_interface() {
     pthread_mutex_lock(&app_state.peer_mutex);
 
-    wclear(app_state.win_header);
+    werase(app_state.win_header);
     box(app_state.win_header, 0, 0);
 
     int max_y, max_x;
@@ -119,17 +128,14 @@ void draw_interface() {
         mvwprintw(app_state.win_header, 1, scan_col, "%s", scan_msg);
         wattroff(app_state.win_header, COLOR_PAIR(2));
     }
-    wrefresh(app_state.win_header);
-
+    wnoutrefresh(app_state.win_header);
     pthread_mutex_unlock(&app_state.peer_mutex);
 
     box(app_state.win_input, 0, 0);
     mvwprintw(app_state.win_input, 1, 2, "> ");
-    wrefresh(app_state.win_input);
+    wnoutrefresh(app_state.win_input);
 
-    pthread_mutex_lock(&app_state.chat_mutex);
-    wrefresh(app_state.win_chat);
-    pthread_mutex_unlock(&app_state.chat_mutex);
+    wnoutrefresh(app_state.win_chat);
 }
 
 void log_message(const char *fmt, ...) {
@@ -163,7 +169,8 @@ void log_message(const char *fmt, ...) {
 
     wattroff(app_state.win_chat, COLOR_PAIR(color));
 
-    wrefresh(app_state.win_chat);
+    wnoutrefresh(app_state.win_chat);
+    doupdate();
     pthread_mutex_unlock(&app_state.chat_mutex);
 }
 
@@ -182,12 +189,22 @@ void show_help() {
     wattron(app_state.win_chat, COLOR_PAIR(3));
     wprintw(app_state.win_chat, "  /file <path>");
     wattroff(app_state.win_chat, COLOR_PAIR(3));
-    wprintw(app_state.win_chat, "  - Send a file to the selected peer\n");
+    wprintw(app_state.win_chat, "\t \t- Send a file to the selected peer\n");
+
+    wattron(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "  /accept");
+    wattroff(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "\t \t- Accept an incoming file transfer\n");
+
+    wattron(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "  /reject");
+    wattroff(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "\t \t- Reject an incoming file transfer\n");
 
     wattron(app_state.win_chat, COLOR_PAIR(3));
     wprintw(app_state.win_chat, "  /help");
     wattroff(app_state.win_chat, COLOR_PAIR(3));
-    wprintw(app_state.win_chat, "         - Show this help message\n");
+    wprintw(app_state.win_chat, "\t \t \t- Show this help message\n");
 
     wprintw(app_state.win_chat, "\n");
 
@@ -200,12 +217,12 @@ void show_help() {
     wattron(app_state.win_chat, COLOR_PAIR(4));
     wprintw(app_state.win_chat, "  UP/DOWN");
     wattroff(app_state.win_chat, COLOR_PAIR(4));
-    wprintw(app_state.win_chat, "       - Select peer\n");
+    wprintw(app_state.win_chat, "\t \t- Select peer\n");
 
     wattron(app_state.win_chat, COLOR_PAIR(4));
     wprintw(app_state.win_chat, "  ESC");
     wattroff(app_state.win_chat, COLOR_PAIR(4));
-    wprintw(app_state.win_chat, "           - Quit\n");
+    wprintw(app_state.win_chat, "\t \t \t- Quit\n");
 
     // Add spacing after help message
     wprintw(app_state.win_chat, "\n");
@@ -214,23 +231,85 @@ void show_help() {
     pthread_mutex_unlock(&app_state.chat_mutex);
 }
 
+void show_file_prompt(const char *sender, const char *filename, size_t filesize) {
+    pthread_mutex_lock(&app_state.chat_mutex);
+
+    wprintw(app_state.win_chat, "\n");
+
+    wattron(app_state.win_chat, COLOR_PAIR(2) | A_BOLD);
+    wprintw(app_state.win_chat, "Incoming file transfer:\n");
+    wattroff(app_state.win_chat, COLOR_PAIR(2) | A_BOLD);
+
+    wattron(app_state.win_chat, COLOR_PAIR(4));
+    wprintw(app_state.win_chat, "  From: %s\n", sender);
+    wprintw(app_state.win_chat, "  File: %s\n", filename);
+    wprintw(app_state.win_chat, "  Size: %zu bytes\n", filesize);
+    wattroff(app_state.win_chat, COLOR_PAIR(4));
+
+    wprintw(app_state.win_chat, "\n");
+
+    wattron(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "  /accept");
+    wattroff(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, " - Accept the file\n");
+
+    wattron(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, "  /reject");
+    wattroff(app_state.win_chat, COLOR_PAIR(3));
+    wprintw(app_state.win_chat, " - Reject the file\n");
+
+    wprintw(app_state.win_chat, "\n");
+    wattron(app_state.win_chat, COLOR_PAIR(2) | A_DIM);
+    wprintw(app_state.win_chat, "(Will auto-reject in 30 seconds)\n");
+    wattroff(app_state.win_chat, COLOR_PAIR(2) | A_DIM);
+    wprintw(app_state.win_chat, "\n");
+
+    wrefresh(app_state.win_chat);
+    pthread_mutex_unlock(&app_state.chat_mutex);
+}
+
+void accept_file_transfer() {
+    pthread_mutex_lock(&app_state.file_transfer_mutex);
+    if (app_state.pending_file_transfer) {
+        app_state.pending_file_transfer = 2; // Signal acceptance
+        log_message("File transfer accepted");
+    } else {
+        log_message("No pending file transfer");
+    }
+    pthread_mutex_unlock(&app_state.file_transfer_mutex);
+}
+
+void reject_file_transfer() {
+    pthread_mutex_lock(&app_state.file_transfer_mutex);
+    if (app_state.pending_file_transfer) {
+        app_state.pending_file_transfer = -1; // Signal rejection
+        log_message("File transfer rejected");
+    } else {
+        log_message("No pending file transfer");
+    }
+    pthread_mutex_unlock(&app_state.file_transfer_mutex);
+}
+
 void handle_input() {
     char input_buf[256];
     int input_pos = 0;
     memset(input_buf, 0, sizeof(input_buf));
 
-    nodelay(app_state.win_input, TRUE);
+    wtimeout(app_state.win_input, 100);
     keypad(app_state.win_input, TRUE);
 
     while (app_state.running) {
+        pthread_mutex_lock(&app_state.chat_mutex);
+        werase(app_state.win_input);
         draw_interface();
-
         mvwprintw(app_state.win_input, 1, 4, "%s", input_buf);
-        wrefresh(app_state.win_input);
+        wnoutrefresh(app_state.win_input);
+        doupdate();
+        pthread_mutex_unlock(&app_state.chat_mutex);
 
         int ch = wgetch(app_state.win_input);
-
         if (ch != ERR) {
+            pthread_mutex_lock(&app_state.chat_mutex);
             if (ch == KEY_UP) {
                 pthread_mutex_lock(&app_state.peer_mutex);
                 if (app_state.peer_count > 0) {
@@ -251,6 +330,10 @@ void handle_input() {
                 if (input_pos > 0) {
                     if (strcmp(input_buf, "/help") == 0) {
                         show_help();
+                    } else if (strcmp(input_buf, "/accept") == 0) {
+                        accept_file_transfer();
+                    } else if (strcmp(input_buf, "/reject") == 0) {
+                        reject_file_transfer();
                     } else if (strncmp(input_buf, "/file ", 6) == 0) {
                         send_file(app_state.selected_peer_index, input_buf + 6);
                     } else {
@@ -258,13 +341,12 @@ void handle_input() {
                     }
                     memset(input_buf, 0, sizeof(input_buf));
                     input_pos = 0;
-                    wclear(app_state.win_input);
+                    werase(app_state.win_input);
                 }
 
             } else if (ch == KEY_BACKSPACE || ch == 127) {
                 if (input_pos > 0) {
                     input_buf[--input_pos] = '\0';
-                    mvwprintw(app_state.win_input, 1, 4 + input_pos, " ");
                 }
 
             } else if (ch == '\t') {
@@ -312,6 +394,7 @@ void handle_input() {
             } else if (ch == 27) {
                 app_state.running = 0;
             }
+            pthread_mutex_unlock(&app_state.chat_mutex);
         }
 
         usleep(10000);

@@ -61,8 +61,8 @@ int load_config_file(char *username, int *port) {
             char *end = val + strlen(val) - 1;
             while (end > val && isspace((unsigned char)*end)) *end-- = '\0';
 
-            strncpy(username, val, USERNAME_LEN);
-            username[USERNAME_LEN - 1] = '\0';
+            memset(username, 0, USERNAME_LEN);
+            strncpy(username, val, USERNAME_LEN - 1);
             if (username[0] != '\0') {
                 found_username = 1;
             }
@@ -114,7 +114,7 @@ void save_config_file(const char *username, int port) {
     printf("Configuration saved to %s\n", path);
 }
 
-void handle_config_command(int argc, char *argv[]) {
+void handle_config_command(int argc, char * const * argv) {
     char username[USERNAME_LEN];
     int port;
 
@@ -139,7 +139,6 @@ void handle_config_command(int argc, char *argv[]) {
     save_config_file(username, port);
 }
 
-// cppcheck-suppress constParameter
 int main(int argc, char *argv[]) {
     char config_username[USERNAME_LEN];
     int config_port = 0;
@@ -151,8 +150,8 @@ int main(int argc, char *argv[]) {
 
     if (argc == 3) {
         // 1️⃣ Use command-line arguments
-        strncpy(app_state.local_username, argv[1], USERNAME_LEN);
-        app_state.local_username[USERNAME_LEN - 1] = '\0';
+        memset(app_state.local_username, 0, USERNAME_LEN);
+        strncpy(app_state.local_username, argv[1], USERNAME_LEN - 1);
 
         char *endptr;
         long val = strtol(argv[2], &endptr, 10);
@@ -165,8 +164,8 @@ int main(int argc, char *argv[]) {
 
     } else if (argc == 1 && load_config_file(config_username, &config_port)) {
         // 2️⃣ Fallback to config file when no CLI arguments are provided
-        strncpy(app_state.local_username, config_username, USERNAME_LEN);
-        app_state.local_username[USERNAME_LEN - 1] = '\0';
+        memset(app_state.local_username, 0, USERNAME_LEN);
+        strncpy(app_state.local_username, config_username, USERNAME_LEN - 1);
         app_state.local_tcp_port = config_port;
 
     } else {

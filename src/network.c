@@ -21,6 +21,15 @@ static ssize_t send_all(int sock, const void *buf, size_t len) {
     return total;
 }
 
+void send_file_response(int sock, int accepted) {
+    MessagePacket response;
+    memset(&response, 0, sizeof(response));
+    response.type = accepted ? MSG_FILE_ACCEPT : MSG_FILE_REJECT;
+    strncpy(response.sender_name, app_state.local_username, USERNAME_LEN - 1);
+    response.payload_len = 0;
+    send_all(sock, &response, sizeof(response));
+}
+
 int get_local_ip(char *ip_buffer, size_t buffer_size) {
     struct ifaddrs *ifaddr, *ifa;
     int found = 0;
@@ -73,7 +82,8 @@ void *beacon_sender(void *arg) {
 
     BeaconPacket packet;
     while (app_state.running) {
-        strncpy(packet.username, app_state.local_username, USERNAME_LEN);
+        memset(packet.username, 0, USERNAME_LEN);
+        strncpy(packet.username, app_state.local_username, USERNAME_LEN - 1);
         packet.tcp_port = app_state.local_tcp_port;
 
         sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&addr, sizeof(addr));
@@ -127,16 +137,24 @@ void *beacon_receiver(void *arg) {
                     break;
                 }
             }
+            int newly_found = 0;
+            char new_peer_name[USERNAME_LEN];
             if (!found && app_state.peer_count < MAX_PEERS) {
                 Peer new_peer;
-                strncpy(new_peer.username, packet.username, USERNAME_LEN);
+                memset(&new_peer, 0, sizeof(new_peer));
+                strncpy(new_peer.username, packet.username, USERNAME_LEN - 1);
                 new_peer.ip_addr = sender_addr.sin_addr;
                 new_peer.tcp_port = packet.tcp_port;
                 new_peer.last_seen = time(NULL);
                 app_state.peers[app_state.peer_count++] = new_peer;
-                log_message("New peer discovered: %s", new_peer.username);
+                strncpy(new_peer_name, new_peer.username, USERNAME_LEN - 1);
+                new_peer_name[USERNAME_LEN - 1] = '\0';
+                newly_found = 1;
             }
             pthread_mutex_unlock(&app_state.peer_mutex);
+            if (newly_found) {
+                log_message("New peer discovered: %s", new_peer_name);
+            }
         }
     }
 
@@ -162,30 +180,87 @@ void *connection_handler(void *arg) {
         } else if (header.type == MSG_FILE_METADATA) {
             FileMetadata meta;
             if (recv(sock, &meta, sizeof(meta), MSG_WAITALL) != sizeof(meta)) break;
+            meta.filename[255] = '\0'; // Ensure null termination
 
             char *filename = strrchr(meta.filename, '/');
             if (filename) filename++;
             else filename = meta.filename;
 
-            log_message("%s is sending file: %s (%ld bytes)", header.sender_name, filename, meta.file_size);
+            // Set up pending transfer
+            pthread_mutex_lock(&app_state.file_transfer_mutex);
+            app_state.pending_file_transfer = 1;
+            memset(app_state.pending_sender, 0, USERNAME_LEN);
+            strncpy(app_state.pending_sender, header.sender_name, USERNAME_LEN - 1);
+            memset(app_state.pending_filename, 0, 256);
+            strncpy(app_state.pending_filename, filename, 255);
+            app_state.pending_filesize = meta.file_size;
+            app_state.pending_sock = sock;
+            app_state.pending_transfer_time = time(NULL);
+            pthread_mutex_unlock(&app_state.file_transfer_mutex);
 
-            int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0) {
-                size_t total_received = 0;
-                char buffer[CHUNK_SIZE];
-                while (total_received < meta.file_size) {
-                    MessagePacket chunk_header;
-                    if (recv(sock, &chunk_header, sizeof(chunk_header), MSG_WAITALL) != sizeof(chunk_header)) break;
-                    if (chunk_header.type != MSG_FILE_CHUNK) break;
+            // Show prompt to user
+            show_file_prompt(app_state.pending_sender, app_state.pending_filename, meta.file_size);
 
-                    if ((size_t)recv(sock, buffer, chunk_header.payload_len, MSG_WAITALL) != chunk_header.payload_len) break;
-
-                    write(fd, buffer, chunk_header.payload_len);
-                    total_received += chunk_header.payload_len;
+            // Wait for user decision (max 30 seconds)
+            int decision = 0;
+            time_t start_time = time(NULL);
+            while (decision == 0 && (time(NULL) - start_time) < 30) {
+                pthread_mutex_lock(&app_state.file_transfer_mutex);
+                if (app_state.pending_file_transfer == 2) {
+                    decision = 1; // Accept
+                } else if (app_state.pending_file_transfer == -1) {
+                    decision = -1; // Reject
                 }
-                close(fd);
-                log_message("File received: %s", filename);
+                pthread_mutex_unlock(&app_state.file_transfer_mutex);
+
+                if (decision == 0) {
+                    usleep(100000); // 100ms
+                }
             }
+
+            // Timeout = reject
+            if (decision == 0) {
+                decision = -1;
+                log_message("File transfer from %s timed out (rejected)", header.sender_name);
+            }
+
+            // Send response
+            send_file_response(sock, decision == 1);
+
+            // Clear pending transfer
+            pthread_mutex_lock(&app_state.file_transfer_mutex);
+            app_state.pending_file_transfer = 0;
+            app_state.pending_sock = -1;
+            pthread_mutex_unlock(&app_state.file_transfer_mutex);
+
+            // If accepted, receive the file
+            if (decision == 1) {
+                int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) {
+                    size_t total_received = 0;
+                    char buffer[CHUNK_SIZE];
+                    while (total_received < meta.file_size) {
+                        MessagePacket chunk_header;
+                        if (recv(sock, &chunk_header, sizeof(chunk_header), MSG_WAITALL) != sizeof(chunk_header)) break;
+                        if (chunk_header.type != MSG_FILE_CHUNK) break;
+
+                        if ((size_t)recv(sock, buffer, chunk_header.payload_len, MSG_WAITALL) != chunk_header.payload_len) break;
+
+                        write(fd, buffer, chunk_header.payload_len);
+                        total_received += chunk_header.payload_len;
+                    }
+                    close(fd);
+                    log_message("File received: %s", filename);
+                } else {
+                    log_message("Failed to open file for writing: %s", filename);
+                }
+            } else {
+                log_message("File transfer rejected: %s", filename);
+            }
+        } else if (header.type == MSG_FILE_ACCEPT) {
+            log_message("File transfer accepted by %s", header.sender_name);
+        } else if (header.type == MSG_FILE_REJECT) {
+            log_message("File transfer rejected by %s", header.sender_name);
         }
     }
 
@@ -257,8 +332,9 @@ void send_text_message(int peer_index, const char *msg) {
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
         MessagePacket header;
+        memset(&header, 0, sizeof(header));
         header.type = MSG_TEXT;
-        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN);
+        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
         header.payload_len = strlen(msg);
         send_all(sock, &header, sizeof(header));
         send_all(sock, msg, header.payload_len);
@@ -296,26 +372,46 @@ void send_file(int peer_index, const char *filepath) {
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
         MessagePacket header;
+        memset(&header, 0, sizeof(header));
         header.type = MSG_FILE_METADATA;
-        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN);
+        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
         header.payload_len = sizeof(FileMetadata);
         send_all(sock, &header, sizeof(header));
 
         FileMetadata meta;
+        memset(&meta, 0, sizeof(meta));
         strncpy(meta.filename, filepath, 255);
         meta.file_size = fsize;
         send_all(sock, &meta, sizeof(meta));
 
-        char buffer[CHUNK_SIZE];
-        ssize_t bytes_read;
-        while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-            header.type = MSG_FILE_CHUNK;
-            strncpy(header.sender_name, app_state.local_username, USERNAME_LEN);
-            header.payload_len = bytes_read;
-            if (send_all(sock, &header, sizeof(header)) <= 0) break;
-            if (send_all(sock, buffer, bytes_read) <= 0) break;
+        log_message("Waiting for %s to accept file transfer...", peer.username);
+
+        // Wait for accept/reject response
+        MessagePacket response;
+        if (recv(sock, &response, sizeof(response), MSG_WAITALL) == sizeof(response)) {
+            if (response.type == MSG_FILE_ACCEPT) {
+                log_message("File transfer accepted by %s", peer.username);
+
+                // Send file chunks
+                char buffer[CHUNK_SIZE];
+                ssize_t bytes_read;
+                while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+                    memset(&header, 0, sizeof(header));
+                    header.type = MSG_FILE_CHUNK;
+                    strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
+                    header.payload_len = bytes_read;
+                    if (send_all(sock, &header, sizeof(header)) <= 0) break;
+                    if (send_all(sock, buffer, bytes_read) <= 0) break;
+                }
+                log_message("Sent file %s to %s", filepath, peer.username);
+            } else if (response.type == MSG_FILE_REJECT) {
+                log_message("File transfer rejected by %s", peer.username);
+            } else {
+                log_message("Invalid response from %s", peer.username);
+            }
+        } else {
+            log_message("No response from %s", peer.username);
         }
-        log_message("Sent file %s to %s", filepath, peer.username);
     } else {
         log_message("Failed to connect to %s", peer.username);
     }
