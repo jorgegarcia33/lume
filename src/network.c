@@ -82,7 +82,8 @@ void *beacon_sender(void *arg) {
 
     BeaconPacket packet;
     while (app_state.running) {
-        strncpy(packet.username, app_state.local_username, USERNAME_LEN);
+        memset(packet.username, 0, USERNAME_LEN);
+        strncpy(packet.username, app_state.local_username, USERNAME_LEN - 1);
         packet.tcp_port = app_state.local_tcp_port;
 
         sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&addr, sizeof(addr));
@@ -138,7 +139,8 @@ void *beacon_receiver(void *arg) {
             }
             if (!found && app_state.peer_count < MAX_PEERS) {
                 Peer new_peer;
-                strncpy(new_peer.username, packet.username, USERNAME_LEN);
+                memset(new_peer.username, 0, USERNAME_LEN);
+                strncpy(new_peer.username, packet.username, USERNAME_LEN - 1);
                 new_peer.ip_addr = sender_addr.sin_addr;
                 new_peer.tcp_port = packet.tcp_port;
                 new_peer.last_seen = time(NULL);
@@ -323,8 +325,9 @@ void send_text_message(int peer_index, const char *msg) {
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
         MessagePacket header;
+        memset(&header, 0, sizeof(header));
         header.type = MSG_TEXT;
-        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN);
+        strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
         header.payload_len = strlen(msg);
         send_all(sock, &header, sizeof(header));
         send_all(sock, msg, header.payload_len);

@@ -114,7 +114,7 @@ void save_config_file(const char *username, int port) {
     printf("Configuration saved to %s\n", path);
 }
 
-void handle_config_command(int argc, char *argv[]) {
+void handle_config_command(int argc, char * const argv[]) {
     char username[USERNAME_LEN];
     int port;
 
@@ -139,7 +139,6 @@ void handle_config_command(int argc, char *argv[]) {
     save_config_file(username, port);
 }
 
-// cppcheck-suppress constParameter
 int main(int argc, char *argv[]) {
     char config_username[USERNAME_LEN];
     int config_port = 0;
