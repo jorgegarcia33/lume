@@ -26,6 +26,7 @@ void send_file_response(int sock, int accepted) {
     memset(&response, 0, sizeof(response));
     response.type = accepted ? MSG_FILE_ACCEPT : MSG_FILE_REJECT;
     strncpy(response.sender_name, app_state.local_username, USERNAME_LEN - 1);
+    response.sender_name[USERNAME_LEN - 1] = '\0';
     response.payload_len = 0;
     send_all(sock, &response, sizeof(response));
 }
@@ -117,45 +118,96 @@ void *beacon_receiver(void *arg) {
         return NULL;
     }
 
+    // Set socket to non-blocking for timeout capability
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
     BeaconPacket packet;
     struct sockaddr_in sender_addr;
     socklen_t sender_len = sizeof(sender_addr);
 
-    while (app_state.running) {
-        ssize_t len = recvfrom(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&sender_addr, &sender_len);
-        if (len == sizeof(packet)) {
-            if (strcmp(packet.username, app_state.local_username) == 0) continue;
+    time_t last_cleanup = time(NULL);
 
-            pthread_mutex_lock(&app_state.peer_mutex);
-            int found = 0;
-            for (int i = 0; i < app_state.peer_count; i++) {
-                if (strcmp(app_state.peers[i].username, packet.username) == 0) {
-                    app_state.peers[i].last_seen = time(NULL);
-                    app_state.peers[i].ip_addr = sender_addr.sin_addr;
-                    app_state.peers[i].tcp_port = packet.tcp_port;
-                    found = 1;
-                    break;
+    while (app_state.running) {
+        ssize_t len;
+        while ((len = recvfrom(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&sender_addr, &sender_len)) > 0) {
+            sender_len = sizeof(sender_addr); // Reset for next recvfrom
+            if (len == sizeof(packet)) {
+                if (strcmp(packet.username, app_state.local_username) == 0) continue;
+
+                pthread_mutex_lock(&app_state.peer_mutex);
+                int found = 0;
+                for (int i = 0; i < app_state.peer_count; i++) {
+                    if (strcmp(app_state.peers[i].username, packet.username) == 0) {
+                        app_state.peers[i].last_seen = time(NULL);
+                        app_state.peers[i].ip_addr = sender_addr.sin_addr;
+                        app_state.peers[i].tcp_port = packet.tcp_port;
+                        found = 1;
+                        break;
+                    }
+                }
+                int newly_found = 0;
+                char new_peer_name[USERNAME_LEN];
+                memset(new_peer_name, 0, USERNAME_LEN);
+                if (!found && app_state.peer_count < MAX_PEERS) {
+                    Peer new_peer;
+                    memset(&new_peer, 0, sizeof(new_peer));
+                    strncpy(new_peer.username, packet.username, USERNAME_LEN - 1);
+                    new_peer.username[USERNAME_LEN - 1] = '\0';
+                    new_peer.ip_addr = sender_addr.sin_addr;
+                    new_peer.tcp_port = packet.tcp_port;
+                    new_peer.last_seen = time(NULL);
+                    app_state.peers[app_state.peer_count++] = new_peer;
+                    strncpy(new_peer_name, new_peer.username, USERNAME_LEN - 1);
+                    new_peer_name[USERNAME_LEN - 1] = '\0';
+                    newly_found = 1;
+                }
+                pthread_mutex_unlock(&app_state.peer_mutex);
+                if (newly_found) {
+                    log_message("New peer discovered: %s", new_peer_name);
                 }
             }
-            int newly_found = 0;
-            char new_peer_name[USERNAME_LEN];
-            if (!found && app_state.peer_count < MAX_PEERS) {
-                Peer new_peer;
-                memset(&new_peer, 0, sizeof(new_peer));
-                strncpy(new_peer.username, packet.username, USERNAME_LEN - 1);
-                new_peer.ip_addr = sender_addr.sin_addr;
-                new_peer.tcp_port = packet.tcp_port;
-                new_peer.last_seen = time(NULL);
-                app_state.peers[app_state.peer_count++] = new_peer;
-                strncpy(new_peer_name, new_peer.username, USERNAME_LEN - 1);
-                new_peer_name[USERNAME_LEN - 1] = '\0';
-                newly_found = 1;
+        }
+
+        // Perform periodic cleanup of stale peers (every 5 seconds)
+        time_t now = time(NULL);
+        if (now - last_cleanup >= 5) {
+            pthread_mutex_lock(&app_state.peer_mutex);
+            time_t current_time = time(NULL);
+            int i = 0;
+            while (i < app_state.peer_count) {
+                // Remove peers not seen in 10 seconds (3+ missed beacons)
+                if (current_time - app_state.peers[i].last_seen > 10) {
+                    char disconnected_peer[USERNAME_LEN];
+                    memset(disconnected_peer, 0, USERNAME_LEN);
+                    strncpy(disconnected_peer, app_state.peers[i].username, USERNAME_LEN - 1);
+                    disconnected_peer[USERNAME_LEN - 1] = '\0';
+
+                    // Shift remaining peers down
+                    for (int j = i; j < app_state.peer_count - 1; j++) {
+                        app_state.peers[j] = app_state.peers[j + 1];
+                    }
+                    app_state.peer_count--;
+
+                    // Adjust selected peer index if necessary
+                    if (app_state.selected_peer_index >= app_state.peer_count) {
+                        app_state.selected_peer_index = app_state.peer_count > 0 ? app_state.peer_count - 1 : -1;
+                    }
+
+                    pthread_mutex_unlock(&app_state.peer_mutex);
+                    log_message("Peer disconnected: %s", disconnected_peer);
+                    pthread_mutex_lock(&app_state.peer_mutex);
+                    // Don't increment i, check the same position again
+                } else {
+                    i++;
+                }
             }
             pthread_mutex_unlock(&app_state.peer_mutex);
-            if (newly_found) {
-                log_message("New peer discovered: %s", new_peer_name);
-            }
+            last_cleanup = now;
         }
+
+        // Sleep briefly to avoid busy-waiting
+        usleep(100000); // 100ms
     }
 
     close(sock);
@@ -318,9 +370,17 @@ void init_network_threads() {
 }
 
 void send_text_message(int peer_index, const char *msg) {
-    if (peer_index < 0 || peer_index >= app_state.peer_count) return;
+    pthread_mutex_lock(&app_state.peer_mutex);
+
+    if (peer_index < 0 || peer_index >= app_state.peer_count) {
+        pthread_mutex_unlock(&app_state.peer_mutex);
+        log_message("No peer selected or peer disconnected");
+        return;
+    }
 
     Peer peer = app_state.peers[peer_index];
+    pthread_mutex_unlock(&app_state.peer_mutex);
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return;
 
@@ -335,6 +395,7 @@ void send_text_message(int peer_index, const char *msg) {
         memset(&header, 0, sizeof(header));
         header.type = MSG_TEXT;
         strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
+        header.sender_name[USERNAME_LEN - 1] = '\0';
         header.payload_len = strlen(msg);
         send_all(sock, &header, sizeof(header));
         send_all(sock, msg, header.payload_len);
@@ -346,7 +407,16 @@ void send_text_message(int peer_index, const char *msg) {
 }
 
 void send_file(int peer_index, const char *filepath) {
-    if (peer_index < 0 || peer_index >= app_state.peer_count) return;
+    pthread_mutex_lock(&app_state.peer_mutex);
+
+    if (peer_index < 0 || peer_index >= app_state.peer_count) {
+        pthread_mutex_unlock(&app_state.peer_mutex);
+        log_message("No peer selected or peer disconnected");
+        return;
+    }
+
+    Peer peer = app_state.peers[peer_index];
+    pthread_mutex_unlock(&app_state.peer_mutex);
 
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
@@ -357,7 +427,6 @@ void send_file(int peer_index, const char *filepath) {
     off_t fsize = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
 
-    Peer peer = app_state.peers[peer_index];
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         close(fd);
@@ -375,12 +444,14 @@ void send_file(int peer_index, const char *filepath) {
         memset(&header, 0, sizeof(header));
         header.type = MSG_FILE_METADATA;
         strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
+        header.sender_name[USERNAME_LEN - 1] = '\0';
         header.payload_len = sizeof(FileMetadata);
         send_all(sock, &header, sizeof(header));
 
         FileMetadata meta;
         memset(&meta, 0, sizeof(meta));
         strncpy(meta.filename, filepath, 255);
+        meta.filename[255] = '\0';
         meta.file_size = fsize;
         send_all(sock, &meta, sizeof(meta));
 
@@ -399,6 +470,7 @@ void send_file(int peer_index, const char *filepath) {
                     memset(&header, 0, sizeof(header));
                     header.type = MSG_FILE_CHUNK;
                     strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
+                    header.sender_name[USERNAME_LEN - 1] = '\0';
                     header.payload_len = bytes_read;
                     if (send_all(sock, &header, sizeof(header)) <= 0) break;
                     if (send_all(sock, buffer, bytes_read) <= 0) break;

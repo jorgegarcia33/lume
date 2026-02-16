@@ -84,40 +84,45 @@ void draw_interface() {
             app_state.local_tcp_port);
 
     if (app_state.peer_count > 0) {
-        if (app_state.selected_peer_index == -1) app_state.selected_peer_index = 0;
-        if (app_state.selected_peer_index >= app_state.peer_count) app_state.selected_peer_index = 0;
+        if (app_state.selected_peer_index < 0) {
+            app_state.selected_peer_index = 0;
+        }
+        if (app_state.selected_peer_index >= app_state.peer_count) {
+            app_state.selected_peer_index = app_state.peer_count - 1;
+        }
 
         Peer selected = app_state.peers[app_state.selected_peer_index];
         char ip_str[INET_ADDRSTRLEN];
+        memset(ip_str, 0, INET_ADDRSTRLEN);
+
         if (inet_ntop(AF_INET, &selected.ip_addr, ip_str, sizeof(ip_str)) == NULL) {
-            strncpy(ip_str, "?", sizeof(ip_str));
+            strncpy(ip_str, "?", sizeof(ip_str) - 1);
             ip_str[sizeof(ip_str) - 1] = '\0';
         }
 
         wattron(app_state.win_header, COLOR_PAIR(3));
 
-        // Calculate length of local user info to prevent overlap
-        int local_info_len = snprintf(NULL, 0, "Lume - %s [%s:%d]",
-                app_state.local_username,
-                app_state.local_ip,
-                app_state.local_tcp_port);
+        char peer_message[128];
+        memset(peer_message, 0, sizeof(peer_message));
+        int local_info_len = snprintf(peer_message, sizeof(peer_message),
+                                    "To: %s [%s:%d] (%d/%d)",
+                                    selected.username,
+                                    ip_str,
+                                    selected.tcp_port,
+                                    app_state.selected_peer_index + 1,
+                                    app_state.peer_count);
 
-        // Position peer info with safe spacing (at least 5 chars gap)
-        int peer_col = local_info_len + 7;
-
-        // Fallback to midpoint if calculated position is too far right
-        if (peer_col > max_x / 2) {
-            peer_col = max_x / 2;
+        // Right align peer message to prevent overlap
+        int peer_col = (max_x - local_info_len) - 2;
+        if (peer_col < 2) {
+            peer_col = 2;
         }
 
-        mvwprintw(app_state.win_header, 1, peer_col, "To: %s [%s:%d] (%d/%d)",
-                selected.username,
-                ip_str,
-                selected.tcp_port,
-                app_state.selected_peer_index + 1,
-                app_state.peer_count);
+        mvwprintw(app_state.win_header, 1, peer_col, "%s", peer_message);
         wattroff(app_state.win_header, COLOR_PAIR(3));
     } else {
+        app_state.selected_peer_index = -1;
+
         wattron(app_state.win_header, COLOR_PAIR(2));
         // Right-align "Scanning for peers..." to prevent overlap
         const char *scan_msg = "Scanning for peers...";
@@ -308,6 +313,7 @@ void handle_input() {
         pthread_mutex_unlock(&app_state.chat_mutex);
 
         int ch = wgetch(app_state.win_input);
+
         if (ch != ERR) {
             pthread_mutex_lock(&app_state.chat_mutex);
             if (ch == KEY_UP) {
