@@ -9,6 +9,7 @@ A lightweight, terminal-based peer-to-peer (P2P) chat application written in C.
 - **Automatic Discovery**: Local network peer discovery via UDP beacons.
 - **Terminal UI**: Interactive interface built with `ncurses`.
 - **File Transfer**: Support for sending and receiving files over the network.
+- **End-to-End Encryption**: All messages and file transfers are encrypted using X25519 key exchange and XSalsa20-Poly1305 authenticated encryption via `libsodium`. Encryption is fully transparent — no configuration or key management required.
 
 </details>
 
@@ -19,6 +20,7 @@ A lightweight, terminal-based peer-to-peer (P2P) chat application written in C.
 - Make
 - ncurses library
 - pthread library
+- libsodium library
 
 </details>
 

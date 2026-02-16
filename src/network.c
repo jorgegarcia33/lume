@@ -8,27 +8,17 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include "../include/network.h"
+#include "../include/crypto.h"
 #include "../include/ui.h"
 
-static ssize_t send_all(int sock, const void *buf, size_t len) {
-    size_t total = 0;
-    const char *p = buf;
-    while (total < len) {
-        ssize_t n = send(sock, p + total, len - total, 0);
-        if (n <= 0) return n;
-        total += n;
-    }
-    return total;
-}
-
-void send_file_response(int sock, int accepted) {
+void send_file_response(SecureConn *conn, int accepted) {
     MessagePacket response;
     memset(&response, 0, sizeof(response));
     response.type = accepted ? MSG_FILE_ACCEPT : MSG_FILE_REJECT;
     strncpy(response.sender_name, app_state.local_username, USERNAME_LEN - 1);
     response.sender_name[USERNAME_LEN - 1] = '\0';
     response.payload_len = 0;
-    send_all(sock, &response, sizeof(response));
+    secure_send(conn, &response, sizeof(response));
 }
 
 int get_local_ip(char *ip_buffer, size_t buffer_size) {
@@ -150,6 +140,7 @@ void *beacon_receiver(void *arg) {
                 char new_peer_name[USERNAME_LEN];
                 memset(new_peer_name, 0, USERNAME_LEN);
                 if (!found && app_state.peer_count < MAX_PEERS) {
+                    int was_empty = (app_state.peer_count == 0);
                     Peer new_peer;
                     memset(&new_peer, 0, sizeof(new_peer));
                     strncpy(new_peer.username, packet.username, USERNAME_LEN - 1);
@@ -161,6 +152,13 @@ void *beacon_receiver(void *arg) {
                     strncpy(new_peer_name, new_peer.username, USERNAME_LEN - 1);
                     new_peer_name[USERNAME_LEN - 1] = '\0';
                     newly_found = 1;
+
+                    // Auto-select only the very first peer discovered
+                    if (was_empty && app_state.selected_peer_index == -1) {
+                        app_state.selected_peer_index = 0;
+                        memset(app_state.selected_peer_name, 0, USERNAME_LEN);
+                        strncpy(app_state.selected_peer_name, new_peer.username, USERNAME_LEN - 1);
+                    }
                 }
                 pthread_mutex_unlock(&app_state.peer_mutex);
                 if (newly_found) {
@@ -183,19 +181,30 @@ void *beacon_receiver(void *arg) {
                     strncpy(disconnected_peer, app_state.peers[i].username, USERNAME_LEN - 1);
                     disconnected_peer[USERNAME_LEN - 1] = '\0';
 
+                    // Check if disconnected peer was the selected one
+                    int was_selected = (strcmp(disconnected_peer, app_state.selected_peer_name) == 0);
+
                     // Shift remaining peers down
                     for (int j = i; j < app_state.peer_count - 1; j++) {
                         app_state.peers[j] = app_state.peers[j + 1];
                     }
                     app_state.peer_count--;
 
-                    // Adjust selected peer index if necessary
-                    if (app_state.selected_peer_index >= app_state.peer_count) {
-                        app_state.selected_peer_index = app_state.peer_count > 0 ? app_state.peer_count - 1 : -1;
+                    if (was_selected) {
+                        // Reset selection — don't auto-switch to another peer
+                        app_state.selected_peer_index = -1;
+                        memset(app_state.selected_peer_name, 0, USERNAME_LEN);
                     }
 
                     pthread_mutex_unlock(&app_state.peer_mutex);
                     log_message("Peer disconnected: %s", disconnected_peer);
+                    if (was_selected) {
+                        if (app_state.peer_count > 0) {
+                            log_message("Use UP/DOWN to select a new peer");
+                        } else {
+                            log_message("No peers available");
+                        }
+                    }
                     pthread_mutex_lock(&app_state.peer_mutex);
                     // Don't increment i, check the same position again
                 } else {
@@ -218,12 +227,21 @@ void *connection_handler(void *arg) {
     int sock = *(int *)arg;
     free(arg);
 
+    SecureConn conn;
+    conn.sock = sock;
+
+    if (secure_handshake_server(&conn) != 0) {
+        close(sock);
+        return NULL;
+    }
+
     MessagePacket header;
-    while (recv(sock, &header, sizeof(header), MSG_WAITALL) > 0) {
+    size_t received;
+    while (secure_recv(&conn, &header, sizeof(header), &received) > 0 && received == sizeof(header)) {
         if (header.type == MSG_TEXT) {
             char *buffer = malloc(header.payload_len + 1);
             if (buffer) {
-                if ((size_t)recv(sock, buffer, header.payload_len, MSG_WAITALL) == header.payload_len) {
+                if (secure_recv(&conn, buffer, header.payload_len, &received) > 0 && received == header.payload_len) {
                     buffer[header.payload_len] = '\0';
                     log_message("%s: %s", header.sender_name, buffer);
                 }
@@ -231,7 +249,7 @@ void *connection_handler(void *arg) {
             }
         } else if (header.type == MSG_FILE_METADATA) {
             FileMetadata meta;
-            if (recv(sock, &meta, sizeof(meta), MSG_WAITALL) != sizeof(meta)) break;
+            if (secure_recv(&conn, &meta, sizeof(meta), &received) <= 0 || received != sizeof(meta)) break;
             meta.filename[255] = '\0'; // Ensure null termination
 
             char *filename = strrchr(meta.filename, '/');
@@ -277,7 +295,7 @@ void *connection_handler(void *arg) {
             }
 
             // Send response
-            send_file_response(sock, decision == 1);
+            send_file_response(&conn, decision == 1);
 
             // Clear pending transfer
             pthread_mutex_lock(&app_state.file_transfer_mutex);
@@ -293,10 +311,10 @@ void *connection_handler(void *arg) {
                     char buffer[CHUNK_SIZE];
                     while (total_received < meta.file_size) {
                         MessagePacket chunk_header;
-                        if (recv(sock, &chunk_header, sizeof(chunk_header), MSG_WAITALL) != sizeof(chunk_header)) break;
+                        if (secure_recv(&conn, &chunk_header, sizeof(chunk_header), &received) <= 0 || received != sizeof(chunk_header)) break;
                         if (chunk_header.type != MSG_FILE_CHUNK) break;
 
-                        if ((size_t)recv(sock, buffer, chunk_header.payload_len, MSG_WAITALL) != chunk_header.payload_len) break;
+                        if (secure_recv(&conn, buffer, chunk_header.payload_len, &received) <= 0 || received != chunk_header.payload_len) break;
 
                         write(fd, buffer, chunk_header.payload_len);
                         total_received += chunk_header.payload_len;
@@ -391,14 +409,23 @@ void send_text_message(int peer_index, const char *msg) {
     addr.sin_addr = peer.ip_addr;
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        SecureConn conn;
+        conn.sock = sock;
+
+        if (secure_handshake_client(&conn) != 0) {
+            log_message("Encryption handshake failed with %s", peer.username);
+            close(sock);
+            return;
+        }
+
         MessagePacket header;
         memset(&header, 0, sizeof(header));
         header.type = MSG_TEXT;
         strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
         header.sender_name[USERNAME_LEN - 1] = '\0';
         header.payload_len = strlen(msg);
-        send_all(sock, &header, sizeof(header));
-        send_all(sock, msg, header.payload_len);
+        secure_send(&conn, &header, sizeof(header));
+        secure_send(&conn, msg, header.payload_len);
         log_message("Me -> %s: %s", peer.username, msg);
     } else {
         log_message("Failed to connect to %s", peer.username);
@@ -440,26 +467,37 @@ void send_file(int peer_index, const char *filepath) {
     addr.sin_addr = peer.ip_addr;
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        SecureConn conn;
+        conn.sock = sock;
+
+        if (secure_handshake_client(&conn) != 0) {
+            log_message("Encryption handshake failed with %s", peer.username);
+            close(sock);
+            close(fd);
+            return;
+        }
+
         MessagePacket header;
         memset(&header, 0, sizeof(header));
         header.type = MSG_FILE_METADATA;
         strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
         header.sender_name[USERNAME_LEN - 1] = '\0';
         header.payload_len = sizeof(FileMetadata);
-        send_all(sock, &header, sizeof(header));
+        secure_send(&conn, &header, sizeof(header));
 
         FileMetadata meta;
         memset(&meta, 0, sizeof(meta));
         strncpy(meta.filename, filepath, 255);
         meta.filename[255] = '\0';
         meta.file_size = fsize;
-        send_all(sock, &meta, sizeof(meta));
+        secure_send(&conn, &meta, sizeof(meta));
 
         log_message("Waiting for %s to accept file transfer...", peer.username);
 
         // Wait for accept/reject response
         MessagePacket response;
-        if (recv(sock, &response, sizeof(response), MSG_WAITALL) == sizeof(response)) {
+        size_t received;
+        if (secure_recv(&conn, &response, sizeof(response), &received) > 0 && received == sizeof(response)) {
             if (response.type == MSG_FILE_ACCEPT) {
                 log_message("File transfer accepted by %s", peer.username);
 
@@ -472,8 +510,8 @@ void send_file(int peer_index, const char *filepath) {
                     strncpy(header.sender_name, app_state.local_username, USERNAME_LEN - 1);
                     header.sender_name[USERNAME_LEN - 1] = '\0';
                     header.payload_len = bytes_read;
-                    if (send_all(sock, &header, sizeof(header)) <= 0) break;
-                    if (send_all(sock, buffer, bytes_read) <= 0) break;
+                    if (secure_send(&conn, &header, sizeof(header)) <= 0) break;
+                    if (secure_send(&conn, buffer, bytes_read) <= 0) break;
                 }
                 log_message("Sent file %s to %s", filepath, peer.username);
             } else if (response.type == MSG_FILE_REJECT) {

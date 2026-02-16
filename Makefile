@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Iinclude -Wall -Wextra -pthread -std=c11 -D_DEFAULT_SOURCE
-LDFLAGS = -lncurses -lpthread
+LDFLAGS = -lncurses -lpthread -lsodium
 SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = bin

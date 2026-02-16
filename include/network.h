@@ -5,6 +5,8 @@
 #include <time.h>
 #include <stdint.h>
 
+struct SecureConn;
+
 #define BROADCAST_PORT 9000
 #define BROADCAST_IP "255.255.255.255"
 #define MAX_PEERS 50
@@ -46,6 +48,6 @@ int get_local_ip(char *ip_buffer, size_t buffer_size);
 void init_network_threads();
 void send_text_message(int peer_index, const char *msg);
 void send_file(int peer_index, const char *filepath);
-void send_file_response(int sock, int accepted);
+void send_file_response(struct SecureConn *conn, int accepted);
 
 #endif

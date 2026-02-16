@@ -7,6 +7,7 @@
 #include <sys/types.h>
 
 #include "../include/network.h"
+#include "../include/crypto.h"
 #include "../include/ui.h"
 
 /*
@@ -185,6 +186,11 @@ int main(int argc, char *argv[]) {
     // Get local IP address
     if (!get_local_ip(app_state.local_ip, sizeof(app_state.local_ip))) {
         strncpy(app_state.local_ip, "unknown", sizeof(app_state.local_ip));
+    }
+
+    if (crypto_init() != 0) {
+        fprintf(stderr, "Error: Failed to initialize encryption.\n");
+        return 1;
     }
 
     init_ui();

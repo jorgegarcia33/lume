@@ -10,6 +10,35 @@
 
 AppState app_state;
 
+static void chat_history_add(const char *text, int color) {
+    int idx = (app_state.chat_start + app_state.chat_count) % MAX_CHAT_LINES;
+    if (app_state.chat_count == MAX_CHAT_LINES) {
+        app_state.chat_start = (app_state.chat_start + 1) % MAX_CHAT_LINES;
+    } else {
+        app_state.chat_count++;
+    }
+    strncpy(app_state.chat_history[idx].text, text, MAX_LINE_LEN - 1);
+    app_state.chat_history[idx].text[MAX_LINE_LEN - 1] = '\0';
+    app_state.chat_history[idx].color = color;
+}
+
+static void redraw_chat_history(void) {
+    werase(app_state.win_chat);
+    scrollok(app_state.win_chat, TRUE);
+    for (int i = 0; i < app_state.chat_count; i++) {
+        int idx = (app_state.chat_start + i) % MAX_CHAT_LINES;
+        ChatLine *line = &app_state.chat_history[idx];
+        if (line->color > 0) {
+            wattron(app_state.win_chat, COLOR_PAIR(line->color));
+        }
+        wprintw(app_state.win_chat, "%s", line->text);
+        if (line->color > 0) {
+            wattroff(app_state.win_chat, COLOR_PAIR(line->color));
+        }
+    }
+    wnoutrefresh(app_state.win_chat);
+}
+
 void init_ui() {
     initscr();
     cbreak();
@@ -48,13 +77,44 @@ void init_ui() {
 
     app_state.peer_count = 0;
     app_state.selected_peer_index = -1;
+    memset(app_state.selected_peer_name, 0, USERNAME_LEN);
     app_state.running = 1;
 
     pthread_mutex_init(&app_state.file_transfer_mutex, NULL);
     app_state.pending_file_transfer = 0;
     app_state.pending_sock = -1;
 
+    app_state.chat_count = 0;
+    app_state.chat_start = 0;
+
     refresh();
+}
+
+void resize_ui() {
+    endwin();
+    refresh();
+
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+
+    wresize(app_state.win_header, 3, max_x);
+    mvwin(app_state.win_header, 0, 0);
+
+    wresize(app_state.win_chat, max_y - 6, max_x);
+    mvwin(app_state.win_chat, 3, 0);
+
+    wresize(app_state.win_input, 3, max_x);
+    mvwin(app_state.win_input, max_y - 3, 0);
+
+    werase(app_state.win_header);
+    werase(app_state.win_input);
+
+    redraw_chat_history();
+
+    wnoutrefresh(stdscr);
+    wnoutrefresh(app_state.win_header);
+    wnoutrefresh(app_state.win_input);
+    doupdate();
 }
 
 void cleanup_ui() {
@@ -84,44 +144,65 @@ void draw_interface() {
             app_state.local_tcp_port);
 
     if (app_state.peer_count > 0) {
-        if (app_state.selected_peer_index < 0) {
-            app_state.selected_peer_index = 0;
-        }
-        if (app_state.selected_peer_index >= app_state.peer_count) {
-            app_state.selected_peer_index = app_state.peer_count - 1;
-        }
-
-        Peer selected = app_state.peers[app_state.selected_peer_index];
-        char ip_str[INET_ADDRSTRLEN];
-        memset(ip_str, 0, INET_ADDRSTRLEN);
-
-        if (inet_ntop(AF_INET, &selected.ip_addr, ip_str, sizeof(ip_str)) == NULL) {
-            strncpy(ip_str, "?", sizeof(ip_str) - 1);
-            ip_str[sizeof(ip_str) - 1] = '\0';
-        }
-
-        wattron(app_state.win_header, COLOR_PAIR(3));
-
-        char peer_message[128];
-        memset(peer_message, 0, sizeof(peer_message));
-        int local_info_len = snprintf(peer_message, sizeof(peer_message),
-                                    "To: %s [%s:%d] (%d/%d)",
-                                    selected.username,
-                                    ip_str,
-                                    selected.tcp_port,
-                                    app_state.selected_peer_index + 1,
-                                    app_state.peer_count);
-
-        // Right align peer message to prevent overlap
-        int peer_col = (max_x - local_info_len) - 2;
-        if (peer_col < 2) {
-            peer_col = 2;
+        // Resolve index from stored peer name
+        if (app_state.selected_peer_name[0] != '\0') {
+            int found = -1;
+            for (int i = 0; i < app_state.peer_count; i++) {
+                if (strcmp(app_state.peers[i].username, app_state.selected_peer_name) == 0) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                app_state.selected_peer_index = found;
+            } else {
+                // Selected peer no longer exists, reset
+                app_state.selected_peer_index = -1;
+                memset(app_state.selected_peer_name, 0, USERNAME_LEN);
+            }
         }
 
-        mvwprintw(app_state.win_header, 1, peer_col, "%s", peer_message);
-        wattroff(app_state.win_header, COLOR_PAIR(3));
+        if (app_state.selected_peer_index >= 0) {
+            Peer selected = app_state.peers[app_state.selected_peer_index];
+            char ip_str[INET_ADDRSTRLEN];
+            memset(ip_str, 0, INET_ADDRSTRLEN);
+
+            if (inet_ntop(AF_INET, &selected.ip_addr, ip_str, sizeof(ip_str)) == NULL) {
+                strncpy(ip_str, "?", sizeof(ip_str) - 1);
+                ip_str[sizeof(ip_str) - 1] = '\0';
+            }
+
+            wattron(app_state.win_header, COLOR_PAIR(3));
+
+            char peer_message[128];
+            memset(peer_message, 0, sizeof(peer_message));
+            int local_info_len = snprintf(peer_message, sizeof(peer_message),
+                                        "To: %s [%s:%d] (%d/%d)",
+                                        selected.username,
+                                        ip_str,
+                                        selected.tcp_port,
+                                        app_state.selected_peer_index + 1,
+                                        app_state.peer_count);
+
+            // Right align peer message to prevent overlap
+            int peer_col = (max_x - local_info_len) - 2;
+            if (peer_col < 2) {
+                peer_col = 2;
+            }
+
+            mvwprintw(app_state.win_header, 1, peer_col, "%s", peer_message);
+            wattroff(app_state.win_header, COLOR_PAIR(3));
+        } else {
+            wattron(app_state.win_header, COLOR_PAIR(2));
+            const char *select_msg = "Select a peer (UP/DOWN)";
+            int sel_col = max_x - (int)strlen(select_msg) - 3;
+            if (sel_col < 2) sel_col = 2;
+            mvwprintw(app_state.win_header, 1, sel_col, "%s", select_msg);
+            wattroff(app_state.win_header, COLOR_PAIR(2));
+        }
     } else {
         app_state.selected_peer_index = -1;
+        memset(app_state.selected_peer_name, 0, USERNAME_LEN);
 
         wattron(app_state.win_header, COLOR_PAIR(2));
         // Right-align "Scanning for peers..." to prevent overlap
@@ -153,10 +234,6 @@ void log_message(const char *fmt, ...) {
     timeinfo = localtime(&rawtime);
     strftime(timestamp, sizeof(timestamp), "[%H:%M:%S] ", timeinfo);
 
-    wattron(app_state.win_chat, COLOR_PAIR(5) | A_DIM);
-    wprintw(app_state.win_chat, "%s", timestamp);
-    wattroff(app_state.win_chat, COLOR_PAIR(5) | A_DIM);
-
     int color = 2;
     if (strstr(fmt, "Me ->") == fmt) {
         color = 3;
@@ -164,14 +241,32 @@ void log_message(const char *fmt, ...) {
         color = 4;
     }
 
-    wattron(app_state.win_chat, COLOR_PAIR(color));
-
+    // Format the message
+    char msg_body[MAX_LINE_LEN];
     va_list args;
     va_start(args, fmt);
-    vw_printw(app_state.win_chat, fmt, args);
-    wprintw(app_state.win_chat, "\n");
+    vsnprintf(msg_body, sizeof(msg_body), fmt, args);
     va_end(args);
 
+    // Store timestamp in history (dim white)
+    chat_history_add(timestamp, 0);
+
+    // Store message body + newline in history
+    char msg_with_nl[MAX_LINE_LEN];
+    int len = snprintf(msg_with_nl, sizeof(msg_with_nl) - 1, "%s", msg_body);
+    if (len >= 0 && (size_t)len < sizeof(msg_with_nl) - 1) {
+        msg_with_nl[len] = '\n';
+        msg_with_nl[len + 1] = '\0';
+    }
+    chat_history_add(msg_with_nl, color);
+
+    // Render to screen
+    wattron(app_state.win_chat, COLOR_PAIR(5) | A_DIM);
+    wprintw(app_state.win_chat, "%s", timestamp);
+    wattroff(app_state.win_chat, COLOR_PAIR(5) | A_DIM);
+
+    wattron(app_state.win_chat, COLOR_PAIR(color));
+    wprintw(app_state.win_chat, "%s\n", msg_body);
     wattroff(app_state.win_chat, COLOR_PAIR(color));
 
     wnoutrefresh(app_state.win_chat);
@@ -316,19 +411,38 @@ void handle_input() {
 
         if (ch != ERR) {
             pthread_mutex_lock(&app_state.chat_mutex);
-            if (ch == KEY_UP) {
+            if (ch == KEY_RESIZE) {
+                resize_ui();
+
+            } else if (ch == KEY_UP) {
                 pthread_mutex_lock(&app_state.peer_mutex);
                 if (app_state.peer_count > 0) {
-                    app_state.selected_peer_index =
-                        (app_state.selected_peer_index + 1) % app_state.peer_count;
+                    if (app_state.selected_peer_index < 0) {
+                        app_state.selected_peer_index = 0;
+                    } else {
+                        app_state.selected_peer_index =
+                            (app_state.selected_peer_index + 1) % app_state.peer_count;
+                    }
+                    memset(app_state.selected_peer_name, 0, USERNAME_LEN);
+                    strncpy(app_state.selected_peer_name,
+                            app_state.peers[app_state.selected_peer_index].username,
+                            USERNAME_LEN - 1);
                 }
                 pthread_mutex_unlock(&app_state.peer_mutex);
 
             } else if (ch == KEY_DOWN) {
                 pthread_mutex_lock(&app_state.peer_mutex);
                 if (app_state.peer_count > 0) {
-                    app_state.selected_peer_index =
-                        (app_state.selected_peer_index - 1 + app_state.peer_count) % app_state.peer_count;
+                    if (app_state.selected_peer_index < 0) {
+                        app_state.selected_peer_index = 0;
+                    } else {
+                        app_state.selected_peer_index =
+                            (app_state.selected_peer_index - 1 + app_state.peer_count) % app_state.peer_count;
+                    }
+                    memset(app_state.selected_peer_name, 0, USERNAME_LEN);
+                    strncpy(app_state.selected_peer_name,
+                            app_state.peers[app_state.selected_peer_index].username,
+                            USERNAME_LEN - 1);
                 }
                 pthread_mutex_unlock(&app_state.peer_mutex);
 

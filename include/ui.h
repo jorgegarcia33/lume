@@ -5,6 +5,14 @@
 #include <pthread.h>
 #include "network.h"
 
+#define MAX_CHAT_LINES 500
+#define MAX_LINE_LEN 512
+
+typedef struct {
+    char text[MAX_LINE_LEN];
+    int color;
+} ChatLine;
+
 typedef struct {
     char local_username[USERNAME_LEN];
     int local_tcp_port;
@@ -20,6 +28,7 @@ typedef struct {
     pthread_mutex_t chat_mutex;
 
     int selected_peer_index;
+    char selected_peer_name[USERNAME_LEN];
     int running;
 
     // File transfer confirmation
@@ -30,6 +39,11 @@ typedef struct {
     int pending_sock;
     time_t pending_transfer_time;
     pthread_mutex_t file_transfer_mutex;
+
+    // Chat history for resize redraw
+    ChatLine chat_history[MAX_CHAT_LINES];
+    int chat_count;
+    int chat_start;
 
 } AppState;
 
