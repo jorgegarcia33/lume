@@ -1,4 +1,6 @@
 bin/
 obj/
+pkg/
+*.deb
 .DS_Store
 lume.conf
